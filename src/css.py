@@ -1,92 +1,332 @@
 import string
 
+idchars = 'qwertyuiopasdfghjklxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM-_$1234567890'
+
+class CSSLexer(object):
+	
+	def __init__(self, css):
+		self.css = css
+		self.i = 0
+	
+	@property
+	def c(self):
+		return self.css[self.i]
+
+	def next(self):
+		
+		if self.c in string.whitespace:
+			while self.c in string.whitespace:
+				self.i += 1
+
+			return ' '
+
+		if self.c in idchars:
+			s = ''
+			while self.c in idchars:
+				s += self.c
+				self.i += 1
+			return s
+
+		if self.c in '"\'':
+			q = self.c
+			s = ''
+			self.i += 1
+			while self.c != q:
+
+				if self.c == '\\':
+					self.i += 1
+					if self.c == '\\':
+						s += '\\'
+					elif self.c in '"\'':
+						s += self.c
+					elif self.c == '\n':
+						pass
+					elif self.c in '1234567890ABCDEF':
+						p = ''
+						while self.c in '1234567890ABCDEF' and len(p) < 6:
+							p += self.c
+							self.i += 1
+						s += chr(int(p, 16))
+					else:
+						s += '\\' + self.c
+				else:
+					s += self.c
+				self.i += 1
+			self.i += 1
+			return s
+
+		c = self.c
+		self.i += 1
+		return c
+
+class CSSASTNode(object):
+	
+	def __call__(self, el):
+		return self.e(el)
+
+class CSSASTAncestor(CSSASTNode):
+	
+	def __init__(self, a, s):
+		self.a = a
+		self.s = s
+	
+	def e(self, el):
+		
+		if not self.s.e(el):
+			return False
+
+		while True:
+			el = el.parent
+			if el is None:
+				return False
+
+			if self.a.e(el):
+				return True
+
+class CSSASTAnd(CSSASTNode):
+	
+	def __init__(self, l, r):
+		self.l = l
+		self.r = r
+	
+	def e(self, el):
+		return self.l.e(el) and self.r.e(el)
+
+class CSSASTBool(CSSASTNode):
+	
+	def __init__(self, val):
+		self.val = val
+	
+	def e(self, el):
+		return self.val
+
+class CSSASTOr(CSSASTNode):
+	
+	def __init__(self, l, r):
+		self.l = l
+		self.r = r
+	
+	def e(self, el):
+		return self.l.e(el) or self.r.e(el)
+
+class CSSASTClass(CSSASTNode):
+	
+	def __init__(self, c):
+		self.c = c
+	
+	def e(self, el):
+		return self.c in el.get_attr('class', '').split()
+
+class CSSASTId(CSSASTNode):
+	
+	def __init__(self, i):
+		self.i = i
+	
+	def e(self, el):
+		return self.i == el.get_attr('id', '')
+
+class CSSASTParent(CSSASTNode):
+	
+	def __init__(self, p, s):
+		self.p = p
+		self.s = s
+	
+	def e(self, el):
+		
+		if not el.parent:
+			return False
+
+		return self.p.e(el.parent) and self.s.e(el)
+
+class CSSASTTag(CSSASTNode):
+	
+	def __init__(self, t):
+		self.t = t
+	
+	def e(self, el):
+		return self.t == el.tag
+
+class CSSParser(object):
+	
+	def __init__(self, lexer):
+		self.lexer = lexer
+		self.lbfr = None
+	
+	def n(self):
+		if self.lbfr is None:
+			self.lbfr = self.lexer.next()
+
+		#print(self.lbfr)
+		return self.lbfr
+	
+	def a(self, tk):
+		return tk == self.n()
+	
+	def c(self):
+		tk = self.n()
+		self.lbfr = None
+		return tk
+	
+	def ac(self, tk):
+		if self.a(tk):
+			return self.c()
+
+		else:
+			return False
+
+	def populate_ruleset(self, rs):
+		
+		try:
+			while True:
+				self.ac(' ')
+				rs.ruleset.extend(self.parse_media_query())
+
+		except IndexError:
+			return
+	
+	def parse_media_query(self):
+		
+		if self.ac('@'):
+			
+			if self.ac('media'):
+				mquery = self.parse_media_query_condition()
+				self.ac(' ')
+				if not self.ac('{'):
+					return []
+
+				self.ac(' ')
+
+				b = []
+				while not self.ac('}'):
+					b.append(self.parse_ruleset())
+					self.ac(' ')
+
+				return [(CSSASTAnd(mquery, cond), does) for cond, does in b]
+
+			else:
+				return []
+
+		else:
+			return [self.parse_ruleset()]
+	
+	def parse_media_query_condition(self):
+		return CSSASTBool(False)
+	
+	def parse_ruleset(self):
+		r = self.parse_rule()
+		b = self.parse_block()
+
+		return (r, b)
+
+	def parse_rule(self):
+		r = self.parse_rule_ancestor()
+
+		self.ac(' ')
+
+		if self.ac(','):
+			self.ac(' ')
+			r = CSSASTOr(r, self.parse_rule())
+
+		return r
+	
+	def parse_rule_ancestor(self):
+		r = self.parse_rule_parent()
+
+		while self.ac(' '):
+			if not (self.a(',') or self.a('{')):
+				r = CSSASTAncestor(r, self.parse_rule_parent())
+		
+		return r
+	
+	def parse_rule_parent(self):
+		r = self.parse_rule_chain()
+
+		self.ac(' ')
+
+		while self.ac('>'):
+			self.ac(' ')
+			r = CSSASTParent(r, self.parse_rule_chain())
+
+		return r
+
+	def parse_rule_chain(self):
+		
+		r = None
+
+		if self.ac('*'):
+			r = CSSASTBool(True)
+		elif self.ac('#'):
+			r = CSSASTId(self.c())
+		elif self.ac('.'):
+			r = CSSASTClass(self.c())
+		else:
+			r = CSSASTTag(self.c())
+
+		if self.a('.') or self.a('#'):
+			r = CSSASTAnd(r, self.parse_rule_chain())
+
+		return r
+	
+	def parse_block(self):
+		
+		self.ac(' ')
+
+		if not self.ac('{'):
+			return dict()
+
+		declarations = {}
+
+		self.ac(' ')
+		while not self.ac('}'):
+			k, v = self.parse_declaration()
+			declarations[k] = v
+			self.ac(' ')
+
+		return declarations 
+	
+	def parse_declaration(self):
+		
+		k = self.c()
+		v = ''
+
+		if self.ac(':'):
+			while not (self.ac(';') or self.a('}')):
+				v += self.c()
+
+		v = v.strip()
+		if v.lower().endswith('!important'):
+			v = v[:-10]
+
+		return k, v
+		
+
 def parse(css):
-    
-    rs = CSSRuleset()
-    
-    tks = []
-    
-    i = 0
-    while i < len(css):
-        
-        if css[i] in string.whitespace:
-            i += 1
-            continue
-        
-        if css[i] in '#=[]{}:;>,.~*':
-            tks.append(css[i])
-            i += 1
-            continue
-        
-        else:
-            s = ''
-            while css[i] not in string.whitespace and css[i] not in '#=[]{}:;>,~':
-                s += css[i]
-                i += 1
-            
-            tks.append(s)
-            continue
-    
-    i = 0
-    while i < len(tks):
-        rule = []
-        does = {}
-        
-        while tks[i] != '{':
-            
-            if tks[i] == ',':
-                rule.append('or')
-            elif tks[i] == '*':
-                rule.append('True')
-            else:
-                rule.append('e.tag==%r' % tks[i].lower())
-                
-            i += 1
-        
-        rule = eval('lambda e:' + ' '.join(rule))
-        
-        i += 1
-        
-        while tks[i] != '}':
-            
-            prop = tks[i]
-            
-            if tks[1+i] != ':':
-                raise TypeError('Can you even CSS?')
-            
-            i += 2
-            
-            val = ''
-            while tks[i] != ';':
-                val += tks[i]
-                i += 1
-            
-            does[prop] = val
-            
-            i += 1
-        
-        i += 1
-        
-        rs.ruleset.append((rule, does))
-        
-    return rs
-            
+	
+	lexer = CSSLexer(css)
+	parser = CSSParser(lexer)
+
+	rs = CSSRuleset()
+
+	parser.populate_ruleset(rs)
+
+	return rs
+
 
 class CSSRuleset(object):
-    
-    def __init__(self):
-        
-        self.ruleset = []
-    
-    def rules(self, el):
-        
-        obj = {}
-        
-        for rule in self.ruleset:
-            if rule[0](el):
-                obj.update(rule[1])
-        
-        return obj
+	
+	def __init__(self):
+		
+		self.ruleset = []
+	
+	def rules(self, el):
+		
+		obj = {}
+		
+		for rule in self.ruleset:
+			if rule[0](el):
+				obj.update(rule[1])
+		
+		return obj
 
 csscolors = {
   "aliceblue": "#f0f8ff",
@@ -241,11 +481,31 @@ csscolors = {
 
 
 def color(css):
-    
-    if css[0] == '#':
-        if len(css) == 4:
-            return (int(css[1], 16)*17,int(css[2], 16)*17,int(css[3], 16)*17)
-        if len(css) == 7:
-            return (int(css[1:3], 16),int(css[3:5], 16),int(css[5:], 16))
-    
-    return color(csscolors.get(css, '#000'))
+	
+	if css == 'transparent':
+		return (0,0,0,0)
+
+	if css[0] == '#':
+		if len(css) == 4:
+			return (int(css[1], 16)*17,int(css[2], 16)*17,int(css[3], 16)*17, 255)
+		if len(css) == 7:
+			return (int(css[1:3], 16),int(css[3:5], 16),int(css[5:], 16), 255)
+	
+	return color(csscolors.get(css, '#000'))
+
+
+def length(css, parent, auto=0):
+	
+	if css == '0':
+		return 0
+	
+	if css == 'auto':
+		return auto
+
+	if css.endswith('px'):
+		return int(css[:-2])
+	
+	if css.endswith('%'):
+		return int(float(css[:-1]) * parent / 100)
+	
+	return 0

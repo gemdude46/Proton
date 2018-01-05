@@ -1,0 +1,15 @@
+<html>
+	<head>
+		<title>New Tab</title>
+		<style>
+			body {
+				text-align: center;
+				color: white;
+				background-color: #003;
+			}
+		</style>
+	</head>
+	<body>
+		<h2>Welcome to Proton</h2>
+	</body>
+</html>
